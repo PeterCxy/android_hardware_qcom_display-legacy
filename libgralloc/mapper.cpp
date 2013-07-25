@@ -58,8 +58,7 @@ static sp<IMemAlloc> getAllocator(int flags)
 }
 
 static int gralloc_map(gralloc_module_t const* module,
-                       buffer_handle_t handle,
-                       void** vaddr)
+                       buffer_handle_t handle)
 {
     private_handle_t* hnd = (private_handle_t*)handle;
     void *mappedAddress;
@@ -86,7 +85,6 @@ static int gralloc_map(gralloc_module_t const* module,
         //LOGD("gralloc_map() succeeded fd=%d, off=%d, size=%d, vaddr=%p",
         //        hnd->fd, hnd->offset, hnd->size, mappedAddress);
     }
-    *vaddr = (void*)hnd->base;
     return 0;
 }
 
@@ -134,8 +132,7 @@ int gralloc_register_buffer(gralloc_module_t const* module,
     private_handle_t* hnd = (private_handle_t*)handle;
     if (hnd->pid != getpid()) {
         hnd->base = 0;
-        void *vaddr;
-        int err = gralloc_map(module, handle, &vaddr);
+        int err = gralloc_map(module, handle);
         if (err) {
             ALOGE("%s: gralloc_map failed", __FUNCTION__);
             return err;
@@ -224,10 +221,9 @@ int terminateBuffer(gralloc_module_t const* module,
     return 0;
 }
 
-int gralloc_lock(gralloc_module_t const* module,
+int gralloc_map_and_invalidate(gralloc_module_t const* module,
                  buffer_handle_t handle, int usage,
-                 int l, int t, int w, int h,
-                 void** vaddr)
+                 int l, int t, int w, int h)
 {
     if (private_handle_t::validate(handle) < 0)
         return -EINVAL;
@@ -239,10 +235,9 @@ int gralloc_lock(gralloc_module_t const* module,
             // we need to map for real
             pthread_mutex_t* const lock = &sMapLock;
             pthread_mutex_lock(lock);
-            err = gralloc_map(module, handle, vaddr);
+            err = gralloc_map(module, handle);
             pthread_mutex_unlock(lock);
         }
-        *vaddr = (void*)hnd->base;
 
         // Lock the buffer for read/write operation as specified. Write lock
         // has a higher priority over read lock.
@@ -273,7 +268,48 @@ int gralloc_lock(gralloc_module_t const* module,
     }
     return err;
 }
+int gralloc_lock(gralloc_module_t const* module,
+                 buffer_handle_t handle, int usage,
+                 int l, int t, int w, int h,
+                 void** vaddr)
+{
+    private_handle_t* hnd = (private_handle_t*)handle;
+    int err = gralloc_map_and_invalidate(module, handle, usage, l, t, w, h);
+    if(!err)
+        *vaddr = (void*)hnd->base;
+    return err;
+}
 
+int gralloc_lock_ycbcr(gralloc_module_t const* module,
+                 buffer_handle_t handle, int usage,
+                 int l, int t, int w, int h,
+                 struct android_ycbcr *ycbcr)
+{
+    private_handle_t* hnd = (private_handle_t*)handle;
+    int err = gralloc_map_and_invalidate(module, handle, usage, l, t, w, h);
+    int ystride;
+    if(!err) {
+        //hnd->format holds our implementation defined format
+        //HAL_PIXEL_FORMAT_YCrCb_420_SP is the only one set right now.
+        switch (hnd->format) {
+            case HAL_PIXEL_FORMAT_YCrCb_420_SP:
+                ystride = ALIGN(hnd->width, 16);
+                ycbcr->y  = (void*)hnd->base;
+                ycbcr->cr = (void*)(hnd->base + ystride * hnd->height);
+                ycbcr->cb = (void*)(hnd->base + ystride * hnd->height + 1);
+                ycbcr->ystride = ystride;
+                ycbcr->cstride = ystride;
+                ycbcr->chroma_step = 2;
+                memset(ycbcr->reserved, 0, sizeof(ycbcr->reserved));
+                break;
+            default:
+                ALOGD("%s: Invalid format passed: 0x%x", __FUNCTION__,
+                      hnd->format);
+                err = -EINVAL;
+        }
+    }
+    return err;
+}
 int gralloc_unlock(gralloc_module_t const* module,
                    buffer_handle_t handle)
 {
